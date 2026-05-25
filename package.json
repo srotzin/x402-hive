@@ -1,6 +1,6 @@
 {
   "name": "x402-hive",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Drop-in x402 adapter that emits a Hive HAHS receipt and SpectralZK sidecar for every x402 payment. Makes any x402 facilitator audit-ready without changing your payment flow.",
   "type": "module",
   "main": "./dist/index.js",

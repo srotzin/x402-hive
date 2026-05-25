@@ -15,7 +15,42 @@ import * as hahs from "@hive-protocol/sdk/hahs";
 import * as spectralzk from "@hive-protocol/sdk/spectralzk";
 import * as shod from "@hive-protocol/sdk/shod";
 
-export const ADAPTER_VERSION = "0.1.0";
+export const ADAPTER_VERSION = "0.2.0";
+
+/**
+ * 5-bps audit-envelope fee. Routed to the Hive treasury wallet on Base.
+ * USDC, USDT, USDP, USDS, DAI, and other ERC-20 stablecoins accepted.
+ * This is the cost of the audit layer. The underlying x402 payment is
+ * unchanged. The clip is a separate transfer that the adapter records on
+ * the receipt under `settlement_meta.hive_fee_bps`.
+ */
+export const HIVE_TREASURY_WALLET = "0x15184Bf50B3d3F52b60434f8942b7D52F2eB436E";
+export const HIVE_FEE_BPS = 5;
+
+export interface HiveFeeInstruction {
+  treasury: string;
+  bps: number;
+  /** Fee amount in the same smallest-unit base as the underlying payment. */
+  amount: string;
+  /** Decimals of the underlying payment, repeated for the caller's convenience. */
+  decimals: number;
+  network: string;
+  payable_with: string;
+}
+
+export function computeHiveFee(payment: X402Payment): HiveFeeInstruction {
+  const amt = typeof payment.amount === "string" ? BigInt(payment.amount) : BigInt(Math.round(payment.amount));
+  // 5 bps = 5 / 10000. Integer math against the smallest-unit amount.
+  const fee = (amt * BigInt(HIVE_FEE_BPS)) / 10000n;
+  return {
+    treasury: HIVE_TREASURY_WALLET,
+    bps: HIVE_FEE_BPS,
+    amount: fee.toString(),
+    decimals: payment.decimals,
+    network: payment.network,
+    payable_with: "USDC, USDT, USDP, USDS, DAI on Base",
+  };
+}
 
 /** Minimal shape of an x402 payment we need to mint a HAHS receipt. */
 export interface X402Payment {
@@ -47,12 +82,21 @@ export interface HiveX402AdapterOpts {
   };
   /** SIU symbol to record on the receipt. Default 'X402-PAYMENT'. */
   symbol?: string;
+  /**
+   * Hive API key. Determines receipt tier (free/pro/scale/enterprise) and
+   * whether anchored receipts can be requested. Without a key, every receipt
+   * is free-tier and carries the upgrade footer.
+   */
+  apiKey?: string;
+  /** Request an anchored receipt for paid tiers. Default false. */
+  anchor?: boolean;
 }
 
 export interface AttestationResult {
   receipt: hahs.HahsReceipt;
   spectralProof?: spectralzk.SpectralProof;
   shodResult?: shod.GateResult;
+  hiveFee: HiveFeeInstruction;
   /** Combined audit payload — what you store or POST upstream. */
   audit: {
     adapter: string;
@@ -60,6 +104,7 @@ export interface AttestationResult {
     network: string;
     resource: string;
     receipt: hahs.HahsReceipt;
+    hive_fee: HiveFeeInstruction;
     proof?: spectralzk.SpectralProof;
   };
 }
@@ -86,6 +131,8 @@ export class HiveX402Adapter {
       }
     }
 
+    const hiveFee = computeHiveFee(payment);
+
     const receipt = await hahs.issue({
       symbol: this.opts.symbol ?? "X402-PAYMENT",
       units: 1,
@@ -94,6 +141,8 @@ export class HiveX402Adapter {
       issuerSk: this.opts.issuerSk,
       hahsAnchor: `${payment.network}:${payment.paymentId}`,
       settlement: payment.network,
+      apiKey: this.opts.apiKey,
+      anchor: this.opts.anchor,
     });
 
     let spectralProof: spectralzk.SpectralProof | undefined;
@@ -111,12 +160,14 @@ export class HiveX402Adapter {
       receipt,
       spectralProof,
       shodResult,
+      hiveFee,
       audit: {
         adapter: `x402-hive/${ADAPTER_VERSION}`,
         payment_id: payment.paymentId,
         network: payment.network,
         resource: payment.resource,
         receipt,
+        hive_fee: hiveFee,
         ...(spectralProof ? { proof: spectralProof } : {}),
       },
     };
